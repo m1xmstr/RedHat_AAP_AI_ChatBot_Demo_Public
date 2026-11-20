@@ -1,0 +1,23 @@
+---
+- name: Render the deployment manifest
+  ansible.builtin.copy:
+    dest: "{{ demo_workspace }}/openshift-demo.json"
+    content: "{{ {'apiVersion': 'v1', 'kind': 'List', 'items': lookup('template', 'openshift/demo-app.yml.j2') | from_yaml_all | list} | to_nice_json }}"
+    mode: "0600"
+  delegate_to: localhost
+  run_once: true
+
+- name: Publish the customer-owned corpus and applications
+  ansible.builtin.command:
+    argv: "{{ [ansible_playbook_python, role_path ~ '/files/cluster_demo.py', 'deploy'] + edu_ai_cluster_args }}"
+  environment:
+    EDU_VM_STORAGE_CLASS: "{{ demo_rhel_vm_storage_class }}"
+    EDU_VM_SOURCE_NAMESPACE: "{{ demo_rhel_vm_source_namespace }}"
+    EDU_VM_SOURCE_NAME: "{{ demo_rhel_vm_source_name }}"
+    EDU_VM_CPU_CORES: "{{ demo_rhel_vm_cpu_cores | string }}"
+    EDU_VM_CPU_REQUEST: "{{ demo_rhel_vm_cpu_request | string }}"
+    EDU_VM_NODE: "{{ demo_rhel_vm_node }}"
+    EDU_VM_FRONTEND_NAMESPACE: "{{ demo_openshift_namespace }}"
+  when: demo_openshift_apply | bool
+  delegate_to: localhost
+  run_once: true

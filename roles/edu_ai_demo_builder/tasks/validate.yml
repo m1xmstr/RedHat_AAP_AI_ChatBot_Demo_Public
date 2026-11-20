@@ -1,0 +1,40 @@
+---
+- name: Validate the local artifact
+  ansible.builtin.include_tasks: smoke_test.yml
+  when: demo_runtime == 'artifact'
+
+- name: Discover application URLs from the live owned namespace
+  ansible.builtin.command:
+    argv: "{{ [ansible_playbook_python, role_path ~ '/files/cluster_demo.py', 'discover'] + edu_ai_cluster_args + (['--podman-rhel'] if edu_ai_podman | bool else []) }}"
+  register: edu_ai_discovery
+  delegate_to: localhost
+  run_once: true
+  changed_when: false
+  when: edu_ai_managed_cluster | bool
+
+- name: Verify the live route, customer identity, RAG download, and cited answer
+  ansible.builtin.command:
+    argv: >-
+      {{ [ansible_playbook_python, role_path ~ '/files/check_live.py', item.value, customer_name, item.key] +
+         (['--build', (lookup('file', demo_workspace ~ '/profile.json') | from_json).generated_at]
+          if edu_ai_action == 'build' else []) }}
+  loop: "{{ (edu_ai_discovery.stdout | default('{}') | from_json) | dict2items }}"
+  register: edu_ai_live
+  delegate_to: localhost
+  run_once: true
+  changed_when: false
+
+- name: Verify the Podman customer application
+  when: edu_ai_podman | bool
+  ansible.builtin.script:
+    cmd: "{{ role_path }}/files/check_live.py http://127.0.0.1:{{ demo_http_port }} {{ customer_name | quote }} {{ 'podman' if demo_runtime == 'podman' else 'rhel_ai' }}"
+    executable: python3
+  changed_when: false
+
+- name: Show verified customer application and downloadable RAG URLs
+  ansible.builtin.debug:
+    msg: "{{ item.stdout | from_json }}"
+  loop: "{{ edu_ai_live.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item.value }}"
+  run_once: true

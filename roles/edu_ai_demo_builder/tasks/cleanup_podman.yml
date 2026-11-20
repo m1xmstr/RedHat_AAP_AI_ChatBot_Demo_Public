@@ -1,0 +1,20 @@
+---
+- name: Require explicit Podman host for cleanup
+  ansible.builtin.assert:
+    that:
+      - inventory_hostname not in ['localhost', '127.0.0.1', '::1']
+      - ansible_connection | default('ssh') != 'local'
+
+- name: Remove customer-owned Podman application and image
+  ansible.builtin.script:
+    cmd: "{{ role_path }}/files/podman_demo.py remove {{ customer_name | quote }} {{ demo_podman_container | quote }} {{ demo_podman_image | quote }}"
+    executable: python3
+  become: true
+
+- name: Remove only the owned customer artifact directory on RHEL
+  ansible.builtin.script:
+    cmd: "{{ role_path }}/files/workspace.py remove {{ demo_podman_remote_dir | quote }} {{ demo_podman_root | quote }} {{ customer_name | quote }}"
+    executable: python3
+  register: edu_ai_remove_remote
+  become: true
+  changed_when: "'unchanged' not in edu_ai_remove_remote.stdout"

@@ -1,0 +1,19 @@
+---
+- name: Remove the selected customer namespace and verify deletion
+  ansible.builtin.command:
+    argv: "{{ [ansible_playbook_python, role_path ~ '/files/cluster_demo.py', 'cleanup'] + edu_ai_cluster_args }}"
+  delegate_to: localhost
+  run_once: true
+  when: edu_ai_managed_cluster | bool
+
+- name: Remove the owned Podman container, image and application directory
+  ansible.builtin.include_tasks: cleanup_podman.yml
+  when: edu_ai_podman | bool
+
+- name: Remove local generated reports, corpus, bundle and manifests
+  ansible.builtin.command:
+    argv: ["{{ ansible_playbook_python }}", "{{ role_path }}/files/workspace.py", remove, "{{ demo_workspace }}", "{{ demo_workspace_root }}", "{{ customer_name }}"]
+  delegate_to: localhost
+  run_once: true
+  register: edu_ai_workspace_removal
+  changed_when: edu_ai_workspace_removal.stdout == 'changed'

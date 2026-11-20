@@ -1,0 +1,47 @@
+---
+- name: Install Podman when requested
+  ansible.builtin.package:
+    name: podman
+    state: present
+  become: true
+  when: demo_manage_podman_packages | bool
+
+- name: Verify that any existing Podman names belong to this customer
+  ansible.builtin.script:
+    cmd: "{{ role_path }}/files/podman_demo.py check {{ customer_name | quote }} {{ demo_podman_container | quote }} {{ demo_podman_image | quote }}"
+    executable: python3
+  become: true
+  changed_when: false
+
+- name: Claim customer directory on RHEL
+  ansible.builtin.script:
+    cmd: "{{ role_path }}/files/workspace.py claim {{ demo_podman_remote_dir | quote }} {{ demo_podman_root | quote }} {{ customer_name | quote }}"
+    executable: python3
+  register: edu_ai_claim_remote
+  become: true
+  changed_when: "'unchanged' not in edu_ai_claim_remote.stdout"
+
+- name: Copy generated app to customer Podman directory
+  ansible.builtin.copy:
+    src: "{{ demo_workspace }}/app/"
+    dest: "{{ demo_podman_remote_dir }}/app/"
+    mode: preserve
+  become: true
+
+- name: Build and start the labelled Podman application
+  ansible.builtin.script:
+    cmd: >-
+      {{ role_path }}/files/podman_demo.py deploy {{ customer_name | quote }} {{ demo_podman_container | quote }} {{ demo_podman_image | quote }}
+      --dir {{ (demo_podman_remote_dir ~ '/app') | quote }} --port {{ demo_http_port | int }}
+      --provider {{ 'podman' if demo_runtime == 'podman' else 'rhel_ai' }}
+      {{ ('--key-secret ' ~ (demo_podman_api_key_secret | quote)) if demo_runtime != 'podman' and demo_podman_api_key_secret else '' }}
+    executable: python3
+  become: true
+  environment:
+    DEMO_LLM_ENDPOINT: "{{ demo_rhel_ai_endpoint if demo_runtime != 'podman' else '' }}"
+    DEMO_LLM_MODEL: "{{ demo_rhel_ai_model if demo_runtime != 'podman' else '' }}"
+  no_log: true
+
+- name: Show Podman URL
+  ansible.builtin.debug:
+    msg: "Podman application at http://{{ ansible_host | default(inventory_hostname) }}:{{ demo_http_port }}"

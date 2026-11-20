@@ -1,0 +1,11 @@
+# Sources, enrichment and the downloadable corpus
+
+The builder visits public pages on the customer’s website and its subdomains, subject to robots rules, redirect validation and crawl limits. Enter a bare domain or an HTTPS URL. Use the optional seed URL field to prioritize an official catalog, calendar, dining directory or other detailed page. The survey defaults to 64 pages and accepts 4 through 80. Use the source inventory to check which pages and passages were collected. Dynamic, private or unavailable pages and uncovered parts of a large site can leave gaps.
+
+The bundled UNC [source profile](../tools/source_profiles/unc.edu.json) identifies official sources including the registrar calendar, public family handbook and dining pages. The application builds new passages from the documents fetched for that run. PDFs use a bundled, checksum-verified version of pypdf. Calendar events retain their dates and descriptions. If a source excludes the crawler or a download fails, the demo can cite only the evidence it collected.
+
+Open **Sources** to inspect the location list and indexed documents. The application serves the source inventory at `/api/sources` and a downloadable JSON Lines file at `/rag.jsonl`. Each RAG record includes its own ID, page title, source URL and text. The data can be inspected or imported into a separate retrieval pipeline. Model prompts use retrieved passages from this corpus. A stored URL or map search alone cannot establish a campus-wide total or a current business opening time.
+
+Where official sources establish a named venue and location, the demo can attach Google Maps search or directions links using the published Maps URL format. The indexed sources supply a venue name and location. Google Maps opens when the visitor clicks the link and resolves the query then. Opening a link does not establish real-time distance, hours, a business count or menu availability. No Google API key, Places API subscription or scraped Google listings are needed. [Google Maps URL documentation](https://developers.google.com/maps/documentation/urls/get-started)
+
+Downloaded corpora are independent copies. A cleanup job removes the customer’s server-side resources. Presenters manage copies they download separately.

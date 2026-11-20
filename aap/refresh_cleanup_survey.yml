@@ -1,0 +1,11 @@
+---
+- name: Refresh the cleanup dropdown from the managed namespaces
+  ansible.builtin.command:
+    argv: >-
+      {{ [ansible_playbook_python, playbook_dir ~ '/../aap/refresh_cleanup_survey.py',
+          '--template-id', edu_ai_cleanup_template_id | string] +
+         (['--vm-namespace', demo_rhel_vm_namespace | default('edu-ai-demo-rhel-vms')]
+          if demo_rhel_vm_enabled | default(false) | bool else []) }}
+  delegate_to: localhost
+  run_once: true
+  when: edu_ai_refresh_cleanup_survey | default(false) | bool

@@ -1,0 +1,62 @@
+---
+customer_name: ""
+customer_website: ""
+demo_runtime: artifact
+demo_max_pages: 64
+demo_logo_url: ""
+demo_logo_file: ""
+demo_seed_urls: []
+demo_question_set:
+  - "When is open enrollment?"
+  - "When can I register for classes?"
+  - "How much is tuition going up?"
+  - "How do I apply for financial assistance?"
+  - "Where are the closest bookstores to campus?"
+  - "How many students find job placement after graduation?"
+
+demo_workspace_root: "{{ lookup('env', 'EDU_AI_DEMO_OUTPUT') | default(playbook_dir ~ '/../demo-output', true) }}"
+demo_customer_slug: "{{ customer_name | lower | regex_replace('[^a-z0-9]+', '-') | regex_replace('(^-+|-+$)', '') }}"
+demo_customer_short_slug: "{{ (demo_customer_slug[:28] | regex_replace('(^-+|-+$)', '')) ~ '-' ~ ((customer_name | hash('sha1'))[:6]) }}"
+demo_workspace: "{{ demo_workspace_root }}/{{ demo_customer_short_slug }}"
+
+demo_app_name: "edu-ai-demo"
+demo_http_port: 8080
+demo_podman_image: "localhost/edu-ai-demo-{{ demo_customer_short_slug }}:latest"
+demo_podman_container: "edu-ai-demo-{{ demo_customer_short_slug }}"
+demo_podman_root: "/opt/edu-ai-demo"
+demo_podman_remote_dir: "{{ demo_podman_root }}/{{ demo_customer_short_slug }}"
+demo_manage_podman_packages: false
+demo_podman_api_key_secret: ""
+
+demo_openshift_namespace_prefix: "edu-ai-demo"
+demo_openshift_namespace: "{{ demo_openshift_namespace_prefix }}-{{ demo_customer_short_slug }}"
+demo_openshift_image: "registry.access.redhat.com/ubi9/python-311:latest"
+demo_openshift_apply: true
+demo_openshift_wait: true
+demo_openshift_apply_method: oc
+
+demo_llm_endpoint_url: ""
+demo_llm_api_key_env: "DEMO_LLM_API_KEY"
+demo_llm_model: "demo-model"
+demo_provider_label: "{{ demo_runtime }}"
+
+# Backend settings belong to inventory or a controller-managed template.
+demo_openshift_ai_endpoint: "{{ demo_llm_endpoint_url }}"
+demo_openshift_ai_model: "{{ demo_llm_model if demo_llm_model != 'demo-model' else '' }}"
+demo_rhel_ai_endpoint: "{{ demo_llm_endpoint_url if demo_runtime != 'all' else '' }}"
+demo_rhel_ai_model: "{{ demo_llm_model if demo_llm_model != 'demo-model' else '' }}"
+demo_openshift_ai_secret: ""
+demo_rhel_ai_secret: ""
+demo_rhel_ai_app_host: podman
+edu_ai_refresh_cleanup_survey: false
+
+# Enabled by the operator after provisioning the OpenShift Virtualization pool.
+demo_rhel_vm_enabled: false
+demo_rhel_vm_namespace: edu-ai-demo-rhel-vms
+demo_rhel_vm_name: "rhel-{{ demo_customer_short_slug }}"
+demo_rhel_vm_storage_class: ocs-storagecluster-ceph-rbd-virtualization
+demo_rhel_vm_source_namespace: openshift-virtualization-os-images
+demo_rhel_vm_source_name: rhel9
+demo_rhel_vm_node: ""
+demo_rhel_vm_cpu_cores: 4
+demo_rhel_vm_cpu_request: "1500m"

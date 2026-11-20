@@ -1,0 +1,312 @@
+---
+- name: Configure the customer demo project and lifecycle templates
+  hosts: localhost
+  gather_facts: false
+  vars:
+    aap_username: admin
+    aap_password: "{{ lookup('env', 'AAP_PASSWORD') }}"
+    aap_api_base: "{{ aap_controller_url | regex_replace('/$', '') }}/api/controller/v2"
+    aap_gateway_base: "{{ aap_controller_url | regex_replace('/$', '') }}/api/gateway/v1"
+    aap_cleanup_job_template_name: EDU_AI_DEMO_CLEANUP
+    aap_survey_username: edu-ai-demo-survey
+    aap_survey_credential_name: EDU AI Demo Cleanup Survey
+    aap_survey_identity_marker: EDU AI Demo Survey
+  module_defaults:
+    ansible.builtin.uri:
+      url_username: "{{ aap_username }}"
+      url_password: "{{ aap_password }}"
+      force_basic_auth: true
+      validate_certs: true
+      ca_path: "{{ aap_ca_path | default(omit) }}"
+      follow_redirects: none
+      body_format: json
+      timeout: 30
+  tasks:
+    - name: Check setup credentials and trusted gateway
+      ansible.builtin.assert:
+        that:
+          - aap_password | length > 0
+          - aap_controller_url is match('^https://')
+        fail_msg: "Set AAP_PASSWORD and provide the HTTPS automation gateway URL."
+      no_log: true
+
+    - name: Check the cluster used to populate the cleanup dropdown
+      ansible.builtin.command: oc whoami --show-server
+      register: edu_cluster_url
+      changed_when: false
+
+    - name: Verify that discovery uses the intended cluster
+      ansible.builtin.assert:
+        that: edu_cluster_url.stdout | trim == openshift_api_url
+        fail_msg: "Use an oc context for the configured openshift_api_url before running setup."
+
+    - name: Build the cleanup survey from live managed deployments
+      ansible.builtin.command:
+        argv: >-
+          {{ [ansible_playbook_python, playbook_dir ~ '/refresh_cleanup_survey.py'] +
+             (['--vm-namespace', demo_rhel_vm_namespace | default('edu-ai-demo-rhel-vms')]
+              if demo_rhel_vm_enabled | default(false) | bool else []) }}
+      register: edu_cleanup_form
+      changed_when: false
+
+    - name: Read deploy survey
+      ansible.builtin.set_fact:
+        edu_survey_base: "{{ lookup('file', playbook_dir ~ '/survey_spec.json') | from_json }}"
+
+    - name: Find approved repository logo choices
+      ansible.builtin.find:
+        paths: "{{ playbook_dir }}/../assets/logos"
+        patterns: '^[A-Za-z0-9_-]+[.](svg|png|jpe?g|webp)$'
+        use_regex: true
+        file_type: file
+        follow: false
+      register: edu_logo_files
+
+    - name: Resolve configured model runtimes
+      ansible.builtin.set_fact:
+        edu_ocp_enabled: "{{ (demo_openshift_ai_endpoint | default('') | length > 0) and (demo_openshift_ai_model | default('') | length > 0) }}"
+        edu_vm_enabled: "{{ demo_rhel_vm_enabled | default(false) | bool }}"
+        edu_rhel_enabled: "{{ (demo_rhel_ai_endpoint | default('') | length > 0) and (demo_rhel_ai_model | default('') | length > 0) }}"
+        edu_logo_choices: "{{ edu_logo_files.files | map(attribute='path') | map('basename') | map('regex_replace', '^', 'assets/logos/') | sort | list }}"
+
+    - name: Select launchable runtimes
+      ansible.builtin.set_fact:
+        edu_runtime_choices: >-
+          {{ (['openshift_ai'] if edu_ocp_enabled else []) + (['rhel_ai'] if edu_rhel_enabled else [])
+             + (['rhel_vm'] if edu_vm_enabled else []) + (['openshift_ai_and_rhel_vm'] if edu_vm_enabled and edu_ocp_enabled else [])
+             + (['all'] if edu_ocp_enabled and edu_rhel_enabled and demo_openshift_ai_endpoint != demo_rhel_ai_endpoint else []) + ['openshift'] }}
+
+    - name: Populate survey defaults from the installation
+      ansible.builtin.set_fact:
+        edu_deploy_fields: >-
+            {{ edu_deploy_fields | default([]) + [
+                 item | combine({'default': demo_max_pages | default(64) | int})
+                 if item.variable == 'demo_max_pages' else item | combine(edu_overrides.get(item.variable, {}))
+               ] }}
+      vars:
+        edu_overrides:
+          demo_logo_file:
+            choices: "{{ edu_logo_choices | join('\n') }}"
+          demo_runtime:
+            choices: "{{ edu_runtime_choices | join('\n') }}"
+            default: "{{ demo_runtime if demo_runtime | default('') in edu_runtime_choices else edu_runtime_choices[0] }}"
+            question_description: "openshift_ai uses the shared OpenShift AI model and creates no VM. rhel_vm provisions one RHEL CPU guest per customer. openshift_ai_and_rhel_vm deploys both. rhel_ai uses a configured RHEL AI appliance endpoint, all pairs that endpoint with OpenShift AI, and openshift uses retrieval only."
+      loop: "{{ edu_survey_base.spec }}"
+      loop_control:
+        label: "{{ item.variable }}"
+      when: item.variable != 'demo_logo_file' or edu_logo_choices | length > 0
+
+    - name: Assemble the deploy survey
+      ansible.builtin.set_fact:
+        edu_deploy_form: "{{ edu_survey_base | combine({'spec': edu_deploy_fields}) }}"
+
+    - name: Locate organization
+      no_log: true
+      ansible.builtin.uri:
+        url: "{{ aap_api_base }}/organizations/?name={{ aap_org_name | urlencode }}"
+      register: aap_org
+
+    - name: Require a unique organization
+      ansible.builtin.assert:
+        that: aap_org.json.count == 1
+
+    - name: Record organization
+      ansible.builtin.set_fact:
+        aap_org_id: "{{ aap_org.json.results[0].id }}"
+
+    - name: Look up configured credentials in the organization
+      ansible.builtin.uri:
+        url: "{{ aap_api_base }}/credentials/?name={{ item | urlencode }}&organization={{ aap_org_id }}"
+      register: edu_credential_lookups
+      loop: "{{ [aap_scm_credential_name | default(''), aap_openshift_credential_name, aap_machine_credential_name | default('')] | reject('equalto', '') | list }}"
+      no_log: true
+
+    - name: Require every configured credential to exist exactly once
+      ansible.builtin.assert:
+        that: edu_credential_lookups.results | map(attribute='json.count') | unique | list == [1]
+        fail_msg: "Check the configured SCM, OpenShift and machine credential names and organization."
+
+    - name: Index credentials without storing their inputs
+      ansible.builtin.set_fact:
+        edu_credential_map: "{{ edu_credential_map | default({}) | combine({item.item: {'id': item.json.results[0].id, 'credential_type': item.json.results[0].credential_type}}) }}"
+      loop: "{{ edu_credential_lookups.results }}"
+      no_log: true
+
+    - name: Locate the project
+      no_log: true
+      ansible.builtin.uri:
+        url: "{{ aap_api_base }}/projects/?name={{ aap_project_name | urlencode }}&organization={{ aap_org_id }}"
+      register: aap_project
+
+    - name: Configure Git project
+      no_log: true
+      ansible.builtin.uri:
+        url: "{{ aap_api_base }}/projects/{{ (aap_project.json.results[0].id ~ '/') if aap_project.json.count else '' }}"
+        method: "{{ 'PATCH' if aap_project.json.count else 'POST' }}"
+        status_code: [200, 201]
+        body: >-
+          {{ {'name': aap_project_name, 'organization': aap_org_id | int,
+              'scm_type': 'git', 'scm_url': aap_project_scm_url, 'scm_branch': aap_project_scm_branch,
+              'scm_clean': true, 'scm_update_on_launch': true}
+             | combine({'credential': edu_credential_map[aap_scm_credential_name].id | int}
+                       if aap_scm_credential_name | default('') else {}) }}
+      register: edu_project_object
+
+    - name: Record project ID
+      ansible.builtin.set_fact:
+        aap_project_id: "{{ edu_project_object.json.id }}"
+
+    - name: Wait for any automatic project sync
+      no_log: true
+      ansible.builtin.uri:
+        url: "{{ aap_api_base }}/projects/{{ aap_project_id }}/"
+      register: edu_project_idle
+      until: not (edu_project_idle.json.current_update | default(none))
+      delay: 2
+      retries: 150
+
+    - name: Start a source sync
+      no_log: true
+      ansible.builtin.uri:
+        url: "{{ aap_api_base }}/projects/{{ aap_project_id }}/update/"
+        method: POST
+        body: {}
+        status_code: [200, 201, 202]
+      register: edu_source_sync
+
+    - name: Wait for the requested revision to sync
+      no_log: true
+      ansible.builtin.uri:
+        url: "{{ aap_api_base }}/project_updates/{{ edu_source_sync.json.id }}/"
+      register: edu_synced
+      until: edu_synced.json.status not in ['new','waiting','pending','running']
+      retries: 150
+      delay: 2
+      failed_when: edu_synced.json.status in ['canceled','failed','error']
+
+    - name: Locate inventory
+      no_log: true
+      ansible.builtin.uri:
+        url: "{{ aap_api_base }}/inventories/?name={{ aap_inventory_name | urlencode }}&organization={{ aap_org_id }}"
+      register: edu_inventory
+
+    - name: Create inventory when missing
+      no_log: true
+      ansible.builtin.uri:
+        url: "{{ aap_api_base }}/inventories/"
+        method: POST
+        body: "{{ {'name': aap_inventory_name, 'organization': aap_org_id | int} }}"
+        status_code: 201
+      register: edu_new_inventory
+      when: not edu_inventory.json.count
+
+    - name: Record inventory ID
+      ansible.builtin.set_fact:
+        aap_inventory_id: "{{ edu_inventory.json.results[0].id if edu_inventory.json.count else edu_new_inventory.json.id }}"
+
+    - name: Locate localhost in the managed inventory
+      no_log: true
+      ansible.builtin.uri:
+        url: "{{ aap_api_base }}/inventories/{{ aap_inventory_id }}/hosts/?name=localhost"
+      register: edu_localhost
+
+    - name: Add localhost when missing
+      no_log: true
+      ansible.builtin.uri:
+        url: "{{ aap_api_base }}/inventories/{{ aap_inventory_id }}/hosts/"
+        method: POST
+        body: {name: localhost, variables: '{"ansible_connection":"local"}'}
+        status_code: 201
+      when: not edu_localhost.json.count
+
+    - name: Locate optional execution environment
+      no_log: true
+      ansible.builtin.uri:
+        url: "{{ aap_api_base }}/execution_environments/?name={{ aap_execution_environment_name | urlencode }}"
+      register: aap_ee_lookup
+      when: aap_execution_environment_name | default('') | length > 0
+
+    - name: Validate optional execution environment
+      ansible.builtin.assert:
+        that: aap_ee_lookup.json.count == 1
+      when: aap_execution_environment_name | default('') | length > 0
+
+    - name: Install deploy, validation and cleanup templates
+      ansible.builtin.include_tasks: configure_template.yml
+      loop:
+        - name: "{{ aap_job_template_name }}"
+          playbook: EDU_AI_DEMO
+          survey: "{{ edu_deploy_form }}"
+        - name: "{{ aap_validation_job_template_name }}"
+          playbook: EDU_AI_DEMO_VALIDATE
+          survey:
+            name: EDU_AI_DEMO_VALIDATE
+            description: Check an existing customer deployment and its live RAG and inference paths.
+            spec: "{{ edu_deploy_form.spec | selectattr('variable','equalto','customer_name') | list }}"
+        - name: "{{ aap_cleanup_job_template_name }}"
+          playbook: EDU_AI_DEMO_CLEANUP
+          survey: "{{ edu_cleanup_form.stdout | from_json }}"
+      loop_control:
+        loop_var: edu_template
+        label: "{{ edu_template.name }}"
+
+    - name: Provision the limited survey credential
+      ansible.builtin.include_tasks: survey_credential.yml
+
+    - name: Select operator settings allowed in demo jobs
+      ansible.builtin.set_fact:
+        edu_job_settings: >-
+          {{ edu_job_settings | default({}) | combine({item: vars[item]}) }}
+      loop:
+        - demo_rhel_vm_enabled
+        - demo_rhel_vm_namespace
+        - demo_rhel_vm_node
+        - demo_rhel_vm_cpu_cores
+        - demo_rhel_vm_cpu_request
+        - demo_rhel_vm_storage_class
+        - demo_rhel_vm_source_namespace
+        - demo_rhel_vm_source_name
+        - demo_rhel_ai_app_host
+        - demo_openshift_ai_endpoint
+        - demo_openshift_ai_model
+        - demo_rhel_ai_endpoint
+        - demo_rhel_ai_model
+        - demo_openshift_ai_secret
+        - demo_rhel_ai_secret
+        - demo_openshift_namespace_prefix
+        - demo_openshift_image
+      when: item in vars
+
+    - name: Configure operator defaults and survey refresh
+      no_log: true
+      ansible.builtin.uri:
+        url: "{{ aap_api_base }}/job_templates/{{ item.value }}/"
+        method: PATCH
+        body:
+          extra_vars: >-
+            {{ {'demo_rhel_ai_app_host':'openshift'} | combine(edu_job_settings | default({}))
+               | combine({'demo_runtime': ((edu_deploy_form.spec | selectattr('variable','equalto','demo_runtime') | first).default if item.key == 'EDU_AI_DEMO' else 'openshift'),
+                          'edu_ai_refresh_cleanup_survey': item.key != 'EDU_AI_DEMO_VALIDATE',
+                          'edu_ai_cleanup_template_id': edu_templates.EDU_AI_DEMO_CLEANUP | int}) | to_json }}
+      loop: "{{ edu_templates | dict2items }}"
+
+    - name: Attach the OpenShift credential to all lifecycle jobs
+      ansible.builtin.include_tasks: attach_credential.yml
+      loop: "{{ (edu_templates.values() | list) | product([edu_credential_map[aap_openshift_credential_name]]) | list }}"
+      loop_control: {loop_var: edu_template_cred}
+
+    - name: Attach the survey credential to deploy and cleanup
+      ansible.builtin.include_tasks: attach_credential.yml
+      loop: "{{ [edu_templates.EDU_AI_DEMO, edu_templates.EDU_AI_DEMO_CLEANUP] | product([edu_survey_cred_ref]) | list }}"
+      loop_control: {loop_var: edu_template_cred}
+
+    - name: Attach a machine credential when using a configured RHEL host
+      ansible.builtin.include_tasks: attach_credential.yml
+      loop: "{{ (edu_templates.values() | list) | product([edu_credential_map[aap_machine_credential_name]]) | list if (aap_machine_credential_name | default('')) else [] }}"
+      loop_control: {loop_var: edu_template_cred}
+
+    - name: Report installed templates and synced revision
+      ansible.builtin.debug:
+        msg:
+          templates: "{{ edu_templates }}"
+          project_revision: "{{ edu_synced.json.scm_revision }}"

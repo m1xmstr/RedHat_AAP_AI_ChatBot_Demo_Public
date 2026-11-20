@@ -1,0 +1,113 @@
+{% for provider in edu_ai_openshift_apps %}
+{% set name = demo_app_name ~ ('-rhel' if provider == 'rhel_ai' and demo_runtime == 'all' else '-vm' if provider == 'rhel_vm' else '') %}
+{% set backend = edu_ai_backends[provider] %}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ name }}
+  namespace: {{ demo_openshift_namespace }}
+  labels: &labels
+    app.kubernetes.io/name: {{ name }}
+    app.kubernetes.io/managed-by: edu-ai-demo-builder
+spec:
+  replicas: 1
+  revisionHistoryLimit: 2
+  selector:
+    matchLabels: *labels
+  template:
+    metadata:
+      labels: *labels
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: {type: RuntimeDefault}
+      initContainers:
+        - name: unpack
+          image: {{ demo_openshift_image | to_json }}
+          command: ["python", "-c"]
+          args:
+            - |
+              import hashlib, io, os, pathlib, zipfile
+              data = b"".join(p.read_bytes() for p in sorted(pathlib.Path("/bundle").glob("[0-9]*")))
+              if hashlib.sha256(data).hexdigest() != os.environ["BUNDLE_SHA256"]:
+                  raise ValueError("bundle checksum mismatch")
+              with zipfile.ZipFile(io.BytesIO(data)) as archive:
+                  archive.extractall("/opt/app")
+          resources:
+            requests: {cpu: 10m, memory: 48Mi}
+            limits: {cpu: 500m, memory: 128Mi}
+          securityContext: &security
+            allowPrivilegeEscalation: false
+            capabilities: {drop: ["ALL"]}
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - {name: app, mountPath: /opt/app}
+            - {name: bundle, mountPath: /bundle, readOnly: true}
+      containers:
+        - name: chatbot
+          image: {{ demo_openshift_image | to_json }}
+          command: ["python", "/opt/app/app.py"]
+          env:
+            - {name: PORT, value: "8080"}
+            - {name: DEMO_AI_PROVIDER, value: {{ provider | to_json }} }
+            - {name: DEMO_LLM_ENDPOINT, value: {{ backend.endpoint | to_json }} }
+            - {name: DEMO_LLM_MODEL, value: {{ backend.model | to_json }} }
+{% if backend.secret %}
+            - name: DEMO_LLM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ backend.secret | to_json }}
+                  key: api-key
+{% endif %}
+          ports: [{containerPort: 8080, name: http}]
+          readinessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 30
+          resources:
+            requests: {cpu: 25m, memory: 64Mi}
+            limits: {cpu: "1", memory: 256Mi}
+          securityContext: *security
+          volumeMounts:
+            - {name: app, mountPath: /opt/app, readOnly: true}
+      volumes:
+        - name: app
+          emptyDir: {sizeLimit: 48Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ name }}
+  namespace: {{ demo_openshift_namespace }}
+  labels:
+    app.kubernetes.io/name: {{ name }}
+    app.kubernetes.io/managed-by: edu-ai-demo-builder
+spec:
+  selector:
+    app.kubernetes.io/name: {{ name }}
+    app.kubernetes.io/managed-by: edu-ai-demo-builder
+  ports:
+    - {name: http, port: 8080, targetPort: http}
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: {{ name }}
+  namespace: {{ demo_openshift_namespace }}
+  labels:
+    app.kubernetes.io/name: {{ name }}
+    app.kubernetes.io/managed-by: edu-ai-demo-builder
+  annotations:
+    edu-ai-demo/runtime: {{ provider }}
+    haproxy.router.openshift.io/timeout: 150s
+spec:
+  to: {kind: Service, name: {{ name }}}
+  port: {targetPort: http}
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+{% endfor %}

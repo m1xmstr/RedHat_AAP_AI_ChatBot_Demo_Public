@@ -1,0 +1,118 @@
+---
+- name: Require valid build inputs and explicit model configuration
+  ansible.builtin.assert:
+    that:
+      - customer_website is string and customer_website | trim | length > 0
+      - (demo_max_pages | int) >= 1 and (demo_max_pages | int) <= 80
+      - demo_question_set is sequence and demo_question_set is not string and demo_question_set | length > 0
+      - demo_logo_file == '' or demo_logo_file is match('^assets/logos/[A-Za-z0-9_-]+[.](svg|png|jpe?g|webp)$')
+      - demo_runtime != 'all' or demo_rhel_ai_endpoint != demo_openshift_ai_endpoint
+    fail_msg: "Check the customer website, crawl settings, and logo path. The all runtime requires distinct OpenShift AI and RHEL AI endpoints."
+
+- name: Require configured AI inference for each requested platform
+  ansible.builtin.assert:
+    that:
+      - edu_ai_backends[item].endpoint is match('^https?://[^@/?#]+(/[^?# ]*)?$')
+      - edu_ai_backends[item].model | length > 0
+    fail_msg: "An administrator must configure demo_{{ item }}_endpoint and demo_{{ item }}_model for {{ item }}."
+  loop: "{{ ['openshift_ai', 'rhel_ai'] if demo_runtime == 'all' else ['openshift_ai'] if demo_runtime == 'openshift_ai_and_rhel_vm' else [demo_runtime] if demo_runtime in ['openshift_ai', 'rhel_ai'] else [] }}"
+
+- name: Require an explicitly selected Podman host
+  ansible.builtin.assert:
+    that:
+      - inventory_hostname not in ['localhost', '127.0.0.1', '::1']
+      - ansible_connection | default('ssh') != 'local'
+    fail_msg: "Select a RHEL machine using edu_ai_target_hosts, or set demo_rhel_ai_app_host=openshift for a Route-backed frontend to an existing RHEL AI server."
+  when: edu_ai_podman | bool
+
+- name: Parse seed URLs from survey input
+  ansible.builtin.set_fact:
+    edu_ai_seed_urls_raw: >-
+      {{
+        (demo_seed_urls | from_yaml)
+        if demo_seed_urls is string
+        else demo_seed_urls
+      }}
+
+- name: Normalize seed URL list
+  ansible.builtin.set_fact:
+    edu_ai_seed_urls: >-
+      {{
+        []
+        if edu_ai_seed_urls_raw is none
+        else (
+          [edu_ai_seed_urls_raw]
+          if edu_ai_seed_urls_raw is string and (edu_ai_seed_urls_raw | trim | length > 0)
+          else edu_ai_seed_urls_raw
+        )
+      }}
+
+
+- name: Validate normalized seeds
+  ansible.builtin.assert:
+    that:
+      - edu_ai_seed_urls is sequence and edu_ai_seed_urls is not string and edu_ai_seed_urls is not mapping
+
+- name: Claim the customer workspace
+  ansible.builtin.command:
+    argv: ["{{ ansible_playbook_python }}", "{{ role_path }}/files/workspace.py", claim, "{{ demo_workspace }}", "{{ demo_workspace_root }}", "{{ customer_name }}"]
+  register: edu_ai_claim
+  delegate_to: localhost
+  changed_when: edu_ai_claim.stdout == 'changed'
+  run_once: true
+
+- name: Write question set for builder and smoke tests
+  ansible.builtin.copy:
+    dest: "{{ demo_workspace }}/questions.json"
+    mode: "0644"
+    content: "{{ demo_question_set | to_nice_json }}"
+  delegate_to: localhost
+  run_once: true
+
+- name: Build customer-specific chatbot artifact
+  ansible.builtin.command:
+    argv: >-
+      {{
+        [
+          ansible_playbook_python,
+          playbook_dir ~ '/../tools/edu_ai_demo_builder.py',
+          '--customer-name', customer_name,
+          '--customer-website', customer_website,
+          '--output-dir', demo_workspace,
+          '--max-pages', demo_max_pages | string,
+          '--questions-file', demo_workspace ~ '/questions.json'
+        ]
+        + ((demo_logo_url | length > 0) | ternary(['--logo-url', demo_logo_url], []))
+        + ((demo_logo_path | length > 0) | ternary(['--logo-file', demo_logo_path], []))
+        + ((edu_ai_seed_urls | length > 0) | ternary(['--seed-url'] + edu_ai_seed_urls, []))
+      }}
+  register: edu_ai_crawl_result
+  changed_when: true
+  delegate_to: localhost
+  run_once: true
+
+
+- name: Show indexed public pages, passage counts, covered locations and crawl exclusions
+  ansible.builtin.debug:
+    msg: "{{ edu_ai_crawl_result.stdout_lines }}"
+  run_once: true
+
+- name: Check generated retrieval before deploying
+  ansible.builtin.include_tasks: smoke_test.yml
+
+- name: Deploy the generated OpenShift apps
+  ansible.builtin.include_tasks: deploy_openshift.yml
+  when: edu_ai_openshift_apps | length > 0
+
+- name: Deploy the generated Podman app
+  ansible.builtin.include_tasks: deploy_podman.yml
+  when: edu_ai_podman | bool
+
+- name: Check every deployed customer runtime
+  ansible.builtin.include_tasks: validate.yml
+  when: (edu_ai_managed_cluster | bool) or (edu_ai_podman | bool)
+
+- name: Report persistent outputs
+  ansible.builtin.debug:
+    msg: "Generated customer workspace at {{ demo_workspace }}"
+  when: not (edu_ai_managed_cluster | bool) and not (edu_ai_podman | bool)

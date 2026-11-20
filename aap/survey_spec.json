@@ -1,0 +1,72 @@
+{
+  "name": "EDU_AI_DEMO",
+  "description": "Build a temporary school-branded AI chatbot demo from public website content.",
+  "spec": [
+    {
+      "question_name": "School / Organization Name",
+      "question_description": "Official school or organization name to show in the demo.",
+      "required": true,
+      "type": "text",
+      "variable": "customer_name",
+      "min": 1,
+      "max": 128,
+      "default": ""
+    },
+    {
+      "question_name": "School / Organization Website",
+      "question_description": "Official public website, for example unc.edu.",
+      "required": true,
+      "type": "text",
+      "variable": "customer_website",
+      "min": 1,
+      "max": 256,
+      "default": ""
+    },
+    {
+      "question_name": "Logo Image URL",
+      "question_description": "Optional direct school logo image URL. Leave blank to auto-discover.",
+      "required": false,
+      "type": "text",
+      "variable": "demo_logo_url",
+      "min": 0,
+      "max": 512,
+      "default": ""
+    },
+    {
+      "question_name": "Project logo",
+      "question_description": "Optional image from the approved project logo directory.",
+      "type": "multiplechoice",
+      "variable": "demo_logo_file",
+      "required": false,
+      "choices": "",
+      "default": ""
+    },
+    {
+      "question_name": "Runtime",
+      "question_description": "openshift_ai uses the shared OpenShift AI model and creates no VM. For a RHEL CPU comparison choose openshift_ai_and_rhel_vm, or choose rhel_vm for just the guest. rhel_ai uses an existing RHEL AI appliance.",
+      "required": false,
+      "type": "multiplechoice",
+      "variable": "demo_runtime",
+      "choices": "openshift_ai\nrhel_ai\nrhel_vm\nopenshift_ai_and_rhel_vm\nall\nopenshift",
+      "default": "openshift_ai"
+    },
+    {
+      "question_name": "Max Pages",
+      "question_description": "Bounded crawl limit for public pages.",
+      "required": false,
+      "type": "integer",
+      "variable": "demo_max_pages",
+      "min": 4,
+      "max": 80,
+      "default": 64
+    },
+    {
+      "question_name": "Seed URLs",
+      "question_description": "Optional list of official page URLs for particular topics, for example admissions or financial aid.",
+      "required": false,
+      "type": "textarea",
+      "variable": "demo_seed_urls",
+      "default": "[]"
+    }
+  ]
+}

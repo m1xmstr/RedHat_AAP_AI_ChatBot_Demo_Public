@@ -1,0 +1,127 @@
+---
+- name: Validate the selected customer and runtime
+  ansible.builtin.assert:
+    that:
+      - customer_name is string and 0 < customer_name | length <= 128
+      - customer_name == customer_name | trim
+      - customer_name.isprintable()
+      - customer_name != 'No managed demos available'
+      - demo_customer_slug | length > 0
+      - demo_runtime in ['artifact', 'podman', 'openshift', 'openshift_ai', 'rhel_ai', 'all', 'rhel_vm', 'openshift_ai_and_rhel_vm']
+      - demo_runtime not in ['rhel_vm','openshift_ai_and_rhel_vm'] or demo_rhel_vm_enabled | bool
+      - demo_rhel_ai_app_host in ['openshift', 'podman']
+      - demo_openshift_namespace is match('^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$')
+      - demo_app_name is match('^[a-z]([-a-z0-9]{0,31}[a-z0-9])?$')
+    fail_msg: "Use a valid customer display name and supported runtime."
+  run_once: true
+
+- name: Resolve selected applications and their separate model providers
+  ansible.builtin.set_fact:
+    edu_ai_openshift_apps: >-
+      {{ (['openshift_ai', 'rhel_vm'] if demo_runtime == 'openshift_ai_and_rhel_vm' else ['openshift_ai'] if demo_runtime == 'all' else [demo_runtime] if demo_runtime in ['openshift', 'openshift_ai','rhel_vm'] else [])
+         + (['rhel_ai'] if demo_runtime in ['rhel_ai', 'all'] and demo_rhel_ai_app_host == 'openshift' else []) }}
+    edu_ai_podman: "{{ demo_runtime == 'podman' or (demo_runtime in ['all', 'rhel_ai'] and demo_rhel_ai_app_host == 'podman') }}"
+    edu_ai_backends:
+      openshift: {endpoint: "", model: "", secret: ""}
+      openshift_ai: {endpoint: "{{ demo_openshift_ai_endpoint }}", model: "{{ demo_openshift_ai_model }}", secret: "{{ demo_openshift_ai_secret }}"}
+      rhel_vm: {endpoint: "http://{{ demo_rhel_vm_name }}.{{ demo_rhel_vm_namespace }}.svc.cluster.local:8000/v1/chat/completions", model: "Qwen/Qwen2.5-0.5B-Instruct", secret: ""}
+      rhel_ai: {endpoint: "{{ demo_rhel_ai_endpoint }}", model: "{{ demo_rhel_ai_model }}", secret: "{{ demo_rhel_ai_secret }}"}
+    demo_logo_path: "{{ (playbook_dir ~ '/../' ~ demo_logo_file) if demo_logo_file else '' }}"
+    edu_ai_token: "{{ lookup('env', 'OCP_API_TOKEN') }}"
+    edu_ai_api_server: "{{ lookup('env', 'OCP_API_URL') }}"
+  no_log: true
+
+- name: Resolve cluster access and lifecycle command
+  ansible.builtin.set_fact:
+    edu_ai_managed_cluster: "{{ edu_ai_openshift_apps | length > 0 and (demo_openshift_apply | bool or edu_ai_action != 'build') }}"
+    edu_ai_cluster_args: >-
+      {{ ['--namespace', demo_openshift_namespace, '--customer', customer_name, '--workspace', demo_workspace, '--runtime', demo_runtime,
+          '--vm-namespace', demo_rhel_vm_namespace, '--vm-name', demo_rhel_vm_name] + (['--vm-enabled'] if demo_rhel_vm_enabled | bool else []) }}
+
+- name: Run the customer lifecycle with guaranteed job finalization
+  block:
+    - name: Use isolated TLS-verified cluster credentials when AAP injects a token
+      when: edu_ai_managed_cluster | bool and (edu_ai_api_server or edu_ai_token)
+      block:
+        - name: Check injected cluster configuration
+          ansible.builtin.assert:
+            that:
+              - edu_ai_api_server is match('^https://')
+              - edu_ai_token | length > 0
+            fail_msg: "The OpenShift credential must supply OCP_API_URL and OCP_API_TOKEN."
+
+        - name: Allocate per-job kubeconfig
+          ansible.builtin.tempfile:
+            state: file
+            suffix: .edu-ai-kubeconfig
+          register: edu_ai_kube_file
+          delegate_to: localhost
+          run_once: true
+
+        - name: Write the verified connection details for oc
+          ansible.builtin.copy:
+            dest: "{{ edu_ai_kube_file.path }}"
+            mode: "0600"
+            content: |
+              apiVersion: v1
+              kind: Config
+              current-context: demo
+              clusters:
+                - name: demo
+                  cluster:
+                    server: {{ edu_ai_api_server | to_json }}
+              {% if lookup('env', 'K8S_AUTH_SSL_CA_CERT') %}
+                    certificate-authority: {{ lookup('env', 'K8S_AUTH_SSL_CA_CERT') | to_json }}
+              {% elif lookup('env', 'OCP_API_CA') %}
+                    certificate-authority-data: {{ lookup('env', 'OCP_API_CA') | b64encode }}
+              {% endif %}
+              contexts:
+                - name: demo
+                  context: {cluster: demo, user: demo}
+              users:
+                - name: demo
+                  user:
+                    token: {{ edu_ai_token | to_json }}
+          delegate_to: localhost
+          run_once: true
+          no_log: true
+
+    - name: Execute customer action
+      ansible.builtin.include_tasks: "{{ {'build': 'build.yml', 'validate': 'validate.yml', 'cleanup': 'cleanup.yml'}[edu_ai_action] }}"
+      args:
+        apply:
+          environment: "{{ {'KUBECONFIG': edu_ai_kube_file.path} if edu_ai_kube_file.path is defined else {} }}"
+  rescue:
+    # Ansible 2.16 can stop all hosts immediately on a failed run_once task.
+    # Record the failure here and report it after the survey and kubeconfig are finalized.
+    - name: Record the failed customer operation
+      ansible.builtin.set_fact:
+        edu_ai_failed_operation: "{{ ansible_failed_task.name }}"
+  always:
+    - name: Reconcile cleanup choices before removing cluster credentials
+      block:
+        - name: Refresh the managed customer list
+          ansible.builtin.include_tasks: "{{ playbook_dir }}/../aap/refresh_cleanup_survey.yml"
+          args:
+            apply:
+              environment: "{{ {'KUBECONFIG': edu_ai_kube_file.path} if edu_ai_kube_file.path is defined else {} }}"
+          when: edu_ai_refresh_cleanup_survey | bool and edu_ai_managed_cluster | bool and edu_ai_action != 'validate'
+      rescue:
+        - name: Record failure to reconcile the cleanup survey
+          ansible.builtin.set_fact:
+            edu_ai_failed_refresh: "{{ ansible_failed_task.name }}"
+      always:
+        - name: Release temporary kubeconfig
+          ansible.builtin.file:
+            path: "{{ edu_ai_kube_file.path }}"
+            state: absent
+          when: edu_ai_kube_file.path is defined
+          delegate_to: localhost
+          run_once: true
+
+- name: Report any customer operation or survey failure after finalization
+  ansible.builtin.fail:
+    msg: >-
+      {{ ([edu_ai_failed_operation | default(''), edu_ai_failed_refresh | default('')]
+          | reject('equalto', '') | join(' and ')) }} failed. See the task output above.
+  when: edu_ai_failed_operation is defined or edu_ai_failed_refresh is defined
