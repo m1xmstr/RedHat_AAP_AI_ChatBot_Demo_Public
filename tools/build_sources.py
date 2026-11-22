@@ -20,6 +20,7 @@ def write_sources(app, profile, pages, chunks, errors, places=None):
                         for place in places or [] if place.get("maps_url") and place.get("source_url"))
     html_page = f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>Sources · {esc(profile['customer_name'])}</title>
+<link rel="icon" href="/favicon.ico" type="image/vnd.microsoft.icon" sizes="16x16 32x32 48x48">
 <link rel="stylesheet" href="/static/styles.css"></head><body><main class="source-page">
 <a href="/">Back to chat</a><h1>Indexed sources</h1><p>{esc(profile['customer_name'])}</p>
 <p>{len(rows)} sources · {len(chunks)} passages · Built {esc(profile['generated_at'][:10])}</p>

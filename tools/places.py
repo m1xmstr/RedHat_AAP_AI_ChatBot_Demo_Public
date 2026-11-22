@@ -276,8 +276,8 @@ def page_places(page, root):
 
 
 
-def customer_destination(records, customer_name, website):
-    """Resolve the customer's map identity, separately from the venues it lists."""
+def customer_location(records, customer_name, website):
+    """Resolve the customer and preserve the official record behind its unique address."""
     site = urlsplit(website if "://" in website else "https://" + website)
     host = (site.hostname or "").removeprefix("www.")
 
@@ -301,17 +301,22 @@ def customer_destination(records, customer_name, website):
             home = (page.hostname or "").removeprefix("www.") == host and page.path.rstrip("/") in ("", site.path.rstrip("/"))
             candidates.append((home, exact, named, record))
     if not candidates:
-        return customer_name, ""
+        return customer_name, None
     # Prefer the identity on the customer's homepage. If equally credible names
     # or branches disagree, a Maps name search avoids picking an arbitrary one.
     rank = max((home, exact) for home, exact, _, _ in candidates)
     preferred = [(name, r) for home, exact, name, r in candidates if (home, exact) == rank]
     names = {name for name, _ in preferred}
     if len(names) != 1:
-        return customer_name, ""
+        return customer_name, None
     name, chosen = preferred[0]
-    addresses = {r["address"] for _, _, identity_name, r in candidates if identity_name == name and r["address"]}
-    return chosen["name"], next(iter(addresses)) if len(addresses) == 1 else ""
+    addresses = {r["address"]: r for _, _, identity_name, r in candidates if identity_name == name and r["address"]}
+    return chosen["name"], next(iter(addresses.values())) if len(addresses) == 1 else None
+
+
+def customer_destination(records, customer_name, website):
+    name, record = customer_location(records, customer_name, website)
+    return name, record["address"] if record else ""
 
 
 def customer_map_url(records, customer_name, website):

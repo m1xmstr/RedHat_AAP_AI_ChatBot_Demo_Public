@@ -65,6 +65,16 @@ class AcceptanceTests(unittest.TestCase):
         self.assertEqual(fetch.call_count, 2)
         stale.read.assert_not_called()
 
+    def test_new_build_rejects_an_html_response_at_the_icon_url(self):
+        def missing_icon(url, data=None, build=None):
+            if url.endswith("/favicon.ico"):
+                return b"<html><body>Demo chat</body></html>"
+            return self.request(url, data, build)
+
+        with patch.object(check, "request", side_effect=missing_icon):
+            with self.assertRaisesRegex(ValueError, "favicon"):
+                check.check("https://example.test", "Fixture", "openshift_ai", build="new")
+
     def test_rejects_wrong_date_or_missing_semester(self):
         self.rows[0]["text"] += "\n2029-11-20: Registration ends for Spring 2030."
         for answer in ("Spring 2030 enrollment starts November 19.", "Enrollment starts November 15.",

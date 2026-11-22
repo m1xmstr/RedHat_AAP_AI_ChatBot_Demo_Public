@@ -57,6 +57,7 @@ INDEX_HTML = """<!doctype html>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>EDU AI Demo</title>
+  <link rel="icon" href="/favicon.ico" type="image/vnd.microsoft.icon" sizes="16x16 32x32 48x48" />
   <link rel="stylesheet" href="/static/styles.css" />
 </head>
 <body>
@@ -81,6 +82,19 @@ INDEX_HTML = """<!doctype html>
   <script>
     let profile = {};
     let previousQuestion = "";
+    function browserSession() {
+      const token = Array.from(crypto.getRandomValues(new Uint8Array(16)),
+        byte => byte.toString(16).padStart(2, "0")).join("");
+      try {
+        const stored = sessionStorage.getItem("demo-chat-session");
+        if (stored && /^[0-9a-f]{32}$/.test(stored)) return stored;
+        sessionStorage.setItem("demo-chat-session", token);
+      } catch {
+        // With browser storage disabled, use a session valid for this page load.
+      }
+      return token;
+    }
+    const session = browserSession();
     const messages = document.querySelector("#messages");
     const suggestions = document.querySelector("#suggestions");
     const form = document.querySelector("#chat-form");
@@ -138,7 +152,7 @@ INDEX_HTML = """<!doctype html>
       try {
         const response = await fetch("/api/chat", {
           method: "POST",
-          headers: {"Content-Type": "application/json"},
+          headers: {"Content-Type": "application/json", "X-Demo-Session": session},
           body: JSON.stringify({question: text, previous_question: previousQuestion})
         });
         const data = await response.json();
@@ -385,8 +399,10 @@ def write_app(output_dir: Path, profile: dict[str, object], knowledge: dict[str,
     app_dir = output_dir / "app"
     static_dir = app_dir / "static"
     static_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(Path(__file__).with_name("static") / "favicon.ico", static_dir / "favicon.ico")
     shutil.copyfile(Path(__file__).with_name("demo_server.py"), app_dir / "app.py")
     shutil.copyfile(Path(__file__).with_name("edu_retrieval.py"), app_dir / "edu_retrieval.py")
+    shutil.copyfile(Path(__file__).with_name("places.py"), app_dir / "places.py")
     with (app_dir / "rag.jsonl").open("w", encoding="utf-8") as output:
         for row in chunks:
             output.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -454,11 +470,12 @@ def main() -> int:
     questions = read_questions(args.questions_file)
     crawl = crawl_site(args.customer_website, args.seed_url, args.max_pages)
     pages = crawl.pages
-    from places import customer_map_url, extract_places, place_pages
+    from places import customer_location, customer_map_url, extract_places, place_pages
     locations = extract_places(pages, args.customer_name, args.customer_website)
     chunks_by_id = {row["id"]: row for row in make_chunks([*pages, *place_pages(locations)])}
     chunks = list(chunks_by_id.values())
-    index = PassageIndex(chunks)
+    _, customer_place = customer_location(locations, args.customer_name, args.customer_website)
+    index = PassageIndex(chunks, customer_place)
     logo_url = (normalize_url(args.logo_url) if args.logo_url else "") or (file_to_data_uri(args.logo_file) if args.logo_file else crawl.logo_url)
     # Offer one question derived from an actual indexed source even for a new customer.
     sample = next((p for p in pages if "tuition" in p["title"].lower()), None)

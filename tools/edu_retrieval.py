@@ -5,6 +5,8 @@ import hashlib
 import math
 import re
 
+from places import STREET
+
 STOP = set("a an and are as at after before be by can could do does find for from give going how i in is it many me much my of on or please say says should tell that the their there this to up what when where which who why will with would about website".split())
 ALIAS = {
     "apply": "application", "applying": "application", "assistance": "aid",
@@ -46,6 +48,22 @@ def words(text):
             word = word[:-1]
         result.append(word)
     return result
+
+
+def asks_customer_location(question, customer_name):
+    q = question.casefold().replace("’", "'")
+    if not re.search(r"\b(?:address|located|based|location)\b|\bwhere(?:\s+(?:is|are)|'s)\b", q):
+        return False
+    # Ignore the whole organization name. A specific department, building, email
+    # or mailing address changes the subject and must not inherit the campus address.
+    name = customer_name.casefold().removeprefix("the ").strip()
+    if name:
+        q = re.sub(r"\b" + re.escape(name) + r"(?:'s)?\b", "", q)
+    generic = {"street", "physical", "address", "located", "based", "location", "campus", "main",
+               "organization", "school", "university", "college", "business", "company", "headquarter",
+               "your", "you", "our", "its", "they", "city", "town", "exact", "full",
+               "need", "know", "want", "get"}
+    return not (set(words(q)) - generic)
 
 
 def sections(page):
@@ -91,8 +109,15 @@ def make_chunks(pages):
 
 
 class PassageIndex:
-    def __init__(self, rows):
+    def __init__(self, rows, customer_place=None):
         self.rows = list(rows)
+        self.customer_place = None
+        self.address_passage = None
+        if customer_place and STREET.search(customer_place["address"]):
+            self.address_passage = next((r for r in self.rows if r["url"] == customer_place["source_url"]
+                                         and customer_place["address"] in r["text"] and customer_place["name"] in r["text"]), None)
+            if self.address_passage:
+                self.customer_place = customer_place
         self.frequencies = []
         self.titles = []
         self.document_count = collections.Counter()
@@ -105,6 +130,8 @@ class PassageIndex:
         self.average_length = sum(sum(f.values()) for f in self.frequencies) / max(1, len(self.rows))
 
     def search(self, question, customer_name="", limit=4):
+        if asks_customer_location(question, customer_name):
+            return [self.address_passage] if self.address_passage else []
         query = set(words(question)) - set(words(customer_name))
         if not query:
             return []
@@ -176,6 +203,14 @@ class PassageIndex:
 
     def evidence(self, question, customer_name):
         passages = self.search(question, customer_name)
+        if asks_customer_location(question, customer_name):
+            place = self.customer_place
+            if place:
+                return {"question": question, "answer": f"{place['name']} is located at {place['address']}.",
+                        "sources": [{"title": place["source_title"], "url": place["source_url"]}],
+                        "places": [place], "confidence": "evidence_found", "provider": "evidence"}, passages
+            return {"question": question, "answer": f"I could not verify a street address for {customer_name} from the indexed sources.",
+                    "sources": [], "confidence": "not_found", "provider": "evidence"}, []
         if not passages:
             return {"question": question, "answer": f"I could not verify that from the indexed pages for {customer_name}.",
                     "confidence": "not_found", "sources": [], "provider": "evidence"}, []

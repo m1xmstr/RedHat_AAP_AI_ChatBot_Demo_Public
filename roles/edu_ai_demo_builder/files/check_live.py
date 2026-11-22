@@ -19,7 +19,7 @@ def request(url, data=None, build=None):
     ca_file = os.environ.get("DEMO_ROUTE_CA_FILE") or os.environ.get("K8S_AUTH_SSL_CA_CERT")
     if ca_file:
         context.load_verify_locations(cafile=ca_file)
-    headers = {"Content-Type": "application/json"}
+    headers = {"Content-Type": "application/json", "X-Demo-Client": "validation"}
     if build:
         headers["X-Demo-Expected-Build"] = build
     req = urllib.request.Request(url, body, headers=headers)
@@ -172,6 +172,7 @@ def check_unc(url, provider, sources, chunks, places, build=None):
 
 
 def check(url, customer, provider, build=None):
+    newly_deployed = bool(build)
     for attempt in range(12):
         try:
             profile = json.loads(request(url + "/api/profile", build=build))
@@ -183,6 +184,10 @@ def check(url, customer, provider, build=None):
     if profile.get("customer_name") != customer or profile.get("provider") != provider:
         raise ValueError("Live customer identity or runtime does not match the selection")
     build = build or profile.get("route_build")
+    if newly_deployed:
+        favicon = request(url + "/favicon.ico", build=build)
+        if len(favicon) < 22 or favicon[:4] != b"\x00\x00\x01\x00":
+            raise ValueError("The deployed chat route did not serve its favicon")
     chunks = [json.loads(line) for line in request(url + "/rag.jsonl", build=build).splitlines() if line.strip()]
     manifest = json.loads(request(url + "/api/sources", build=build))
     if build and not (profile.get("generated_at") == manifest.get("built_at") == build):

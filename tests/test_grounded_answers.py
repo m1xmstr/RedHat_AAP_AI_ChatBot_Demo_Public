@@ -13,7 +13,8 @@ from unittest.mock import patch
 TOOLS = Path(__file__).resolve().parents[1] / "tools"
 sys.path.insert(0, str(TOOLS))
 from edu_ai_demo_builder import write_app
-from edu_retrieval import explicit_book_count, make_chunks
+from edu_retrieval import PassageIndex, asks_customer_location, explicit_book_count, make_chunks
+from places import customer_location
 
 
 class GroundedAnswerTests(unittest.TestCase):
@@ -87,6 +88,43 @@ class GroundedAnswerTests(unittest.TestCase):
         self.assertTrue(explicit_book_count("The university operates two bookstores."))
         self.assertFalse(explicit_book_count("I visited two bookstores near campus."))
         self.assertFalse(explicit_book_count("There are at least three bookstores on campus."))
+
+    def test_customer_address_requires_unique_official_corpus_evidence(self):
+        name = "Michigan Technological University"
+        url = "https://www.mtu.edu/"
+        address = "1400 Townsend Drive, Houghton, MI, 49931-1295"
+        question = f"What is the street address of {name}?"
+        place = {"name": name, "category": "campus", "address": address, "source_title": name, "source_url": url}
+        pages = [{"title": "Salary", "url": url + "rankings/", "text": "Best public college for salary impact (Wall Street Journal)"},
+                 {"title": name, "url": url, "text": f"Campus location: {name}. {name} — {address}"}]
+        rows = list(make_chunks(pages))
+        profile = {"customer_name": name, "customer_website": url}
+        write_app(self.root, profile, {"pages": pages}, rows)
+        (self.root / "app" / "sources.json").write_text(json.dumps({"places": [place]}))
+        self.answer = runpy.run_path(str(self.root / "app" / "app.py"))["answer"]
+        for q in (question, "What’s your physical address?", f"Where is {name} located?"):
+            result = self.answer(q)
+            self.assertIn(address, result["answer"])
+            self.assertEqual([{"title": name, "url": url}], result["sources"])
+            self.assertEqual([place], result["places"])
+        selected = self.model_answer(question, '{"choices":[1]}')
+        self.assertEqual(selected["provider"], "rhel_vm")
+        self.assertEqual(selected["method"], "source_selection")
+        self.assertIn(address, selected["answer"])
+        # Bystander venues, incomplete addresses, conflicting branches and unindexed
+        # records cannot supply an organization's address, even if "street" ranks highly.
+        for records in ([], [{**place, "name": "Library"}], [{**place, "address": "Houghton"}],
+                        [place, {**place, "address": "42 Pine Street"}],
+                        [{**place, "source_url": "https://other.example/"}],
+                        [{**place, "source_url": url + "unindexed/"}]):
+            _, campus = customer_location(records, name, url)
+            result, passages = PassageIndex(rows, campus).evidence(question, name)
+            self.assertEqual(result["confidence"], "not_found")
+            self.assertFalse(result["sources"] or passages)
+            self.assertNotIn(address, result["answer"])
+        for other in ("Where is the campus bookstore?", "What is the email address of the university?",
+                      "What is the address of the financial aid office?", f"Where is the library at {name}?"):
+            self.assertFalse(asks_customer_location(other, name))
 
 
 if __name__ == "__main__":

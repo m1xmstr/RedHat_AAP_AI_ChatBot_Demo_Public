@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Generated demo HTTP service. Run from inside a built app directory."""
 
+import hashlib
 import json
 import os
 import re
@@ -10,13 +11,17 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from edu_retrieval import BOOK, FOOD, REGISTER, PassageIndex, words, explicit_book_count
+from edu_retrieval import BOOK, FOOD, REGISTER, PassageIndex, asks_customer_location, words, explicit_book_count
+from places import customer_location
 
 ROOT = Path(__file__).resolve().parent
 PROFILE = json.loads((ROOT / "profile.json").read_text(encoding="utf-8"))
 RAG_FILE = ROOT / "rag.jsonl"
+SOURCE_FILE = ROOT / "sources.json"
+PLACES = json.loads(SOURCE_FILE.read_text(encoding="utf-8")).get("places", []) if SOURCE_FILE.exists() else []
+_, CUSTOMER_PLACE = customer_location(PLACES, PROFILE["customer_name"], PROFILE.get("customer_website", ""))
 with RAG_FILE.open(encoding="utf-8") as corpus:
-    INDEX = PassageIndex(json.loads(line) for line in corpus)
+    INDEX = PassageIndex((json.loads(line) for line in corpus), CUSTOMER_PLACE)
 SOURCE_URLS = {row["url"] for row in INDEX.rows}
 PLACE_SECTIONS = {}
 for row in INDEX.rows:
@@ -25,8 +30,6 @@ for row in INDEX.rows:
         detail = row["text"][len(heading):].strip().splitlines()[0]
         if 25 <= len(detail) <= 320:
             PLACE_SECTIONS.setdefault((row["url"], heading.casefold()), detail)
-SOURCE_FILE = ROOT / "sources.json"
-PLACES = json.loads(SOURCE_FILE.read_text(encoding="utf-8")).get("places", []) if SOURCE_FILE.exists() else []
 
 
 def evidence_answer(question):
@@ -35,6 +38,10 @@ def evidence_answer(question):
 
 def selection_context(question, passages):
     """For dates, counts and places, a model chooses records; the server quotes their fields."""
+    if INDEX.customer_place and asks_customer_location(question, PROFILE["customer_name"]):
+        p = INDEX.customer_place
+        return "address", [{"label": f"{p['name']} is located at {p['address']}.", "title": p["source_title"],
+                            "url": p["source_url"], "place": p}], 1
     if REGISTER.search(question) and re.search(r"\bwhen|date|schedule|appointment", question, re.I):
         events = [p for p in passages if p.get("format") == "ical"]
         if events:
@@ -235,6 +242,17 @@ def answer(question, previous_question=""):
     return base
 
 
+def activity_event(headers, customer):
+    event = {"v": 1, "event": "edu_demo_chat", "source": "api"}
+    if headers.get("X-Demo-Client") == "validation":
+        event["source"] = "validation"
+    elif re.fullmatch("[0-9a-f]{32}", headers.get("X-Demo-Session", "")):
+        nonce = headers["X-Demo-Session"]
+        session = hashlib.sha256((customer + ":" + nonce).encode()).hexdigest()[:32]
+        event.update(source="browser", session=session)
+    return event
+
+
 class Handler(BaseHTTPRequestHandler):
     def send_bytes(self, status, raw, content_type, *, filename=None):
         self.send_response(status)
@@ -269,6 +287,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_bytes(200, RAG_FILE.read_bytes(), "application/x-ndjson", filename=PROFILE["customer_slug"] + "-rag.jsonl")
         elif self.path == "/static/styles.css":
             self.send_bytes(200, (ROOT / "static" / "styles.css").read_bytes(), "text/css")
+        elif self.path == "/favicon.ico":
+            self.send_bytes(200, (ROOT / "static" / "favicon.ico").read_bytes(), "image/vnd.microsoft.icon")
         elif self.path == "/":
             self.send_bytes(200, (ROOT / "static" / "index.html").read_bytes(), "text/html; charset=utf-8")
         else:
@@ -295,11 +315,15 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(400, {"error": "Enter a question of up to 2,000 characters."})
             return
         previous = data.get("previous_question", "")
-        self.send_json(200, answer(question.strip(), previous[:2000] if isinstance(previous, str) else ""))
+        response = answer(question.strip(), previous[:2000] if isinstance(previous, str) else "")
+        self.send_json(200, response)
+        print(json.dumps(activity_event(self.headers, PROFILE["customer_name"])), flush=True)
 
     def log_message(self, fmt, *args):
         return
 
 
 if __name__ == "__main__":
-    ThreadingHTTPServer(("0.0.0.0", int(os.environ.get("PORT", "8080"))), Handler).serve_forever()
+    with ThreadingHTTPServer(("0.0.0.0", int(os.environ.get("PORT", "8080"))), Handler) as server:
+        print(json.dumps({"v": 1, "event": "edu_demo_started"}), flush=True)
+        server.serve_forever()

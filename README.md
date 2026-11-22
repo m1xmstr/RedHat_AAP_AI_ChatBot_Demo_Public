@@ -40,4 +40,5 @@ The job prints the customer workspace and checks the generated corpus. To remove
 - [AAP installation and credentials](aap/README.md)
 - [Runtime, storage and ownership](docs/ARCHITECTURE.md)
 - [Presentation and cleanup runbook](docs/DEMO_RUNBOOK.md)
+- [Daily resource and anonymous chat activity reports](docs/DEMO_INVENTORY.md)
 - [Source formats, campus places and Maps links](docs/SOURCES.md)
